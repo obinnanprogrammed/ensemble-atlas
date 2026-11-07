@@ -39,12 +39,13 @@ def worker(ctx: typer.Context,
            worker_id: Annotated[str, typer.Option("--id", help="Unique label for this worker.")] = "worker-1",
            lease_seconds: Annotated[float, typer.Option(min=0.1)] = 120.0,
            heartbeat_seconds: Annotated[float, typer.Option(min=0.01)] = 20.0,
+           max_attempts: Annotated[int, typer.Option(min=1, help="Total claims allowed per chunk, including retries.")] = 3,
            cpu_threads: Annotated[int, typer.Option(min=1)] = 2):
     """Load CLAP once on CPU, process available chunks, then exit."""
     if not worker_id.strip():
         raise ValueError("Worker ID cannot be blank.")
     config = Config(data_dir=ctx.obj.data_dir, lease_seconds=lease_seconds,
-                    heartbeat_seconds=heartbeat_seconds, cpu_threads=cpu_threads)
+                    heartbeat_seconds=heartbeat_seconds, max_attempts=max_attempts, cpu_threads=cpu_threads)
     coordinator = LocalCoordinator(Storage(config))
     counts = coordinator.status()["counts"]
     if not (counts["pending"] or counts["leased"]):
@@ -54,8 +55,9 @@ def worker(ctx: typer.Context,
     embedder = ClapEmbedder(config)
     summary = run_worker(coordinator, config, worker_id, embedder, lambda message: console.print(message, markup=False))
     console.print(f"Completed {summary['completed']} chunk(s) in {summary['elapsed_seconds']:.2f}s "
-                  f"({summary['chunks_per_second']:.3f} chunks/s); {summary['failed_attempts']} failed attempt(s).")
-    if summary["failed_attempts"] or coordinator.status()["counts"]["failed"]:
+                  f"({summary['chunks_per_second']:.3f} chunks/s); {summary['failed_attempts']} failed attempt(s); "
+                  f"{summary['discarded']} discarded result(s).")
+    if summary["failed_attempts"] or summary["discarded"] or coordinator.status()["counts"]["failed"]:
         raise typer.Exit(1)
 
 

@@ -72,6 +72,7 @@ class Storage:
         try:
             db.execute("PRAGMA foreign_keys=ON")
             db.execute("PRAGMA busy_timeout=10000")
+            db.execute("PRAGMA synchronous=FULL")
             if write:
                 db.execute("BEGIN IMMEDIATE")
             yield db
@@ -90,6 +91,7 @@ class Storage:
         recording_id = uuid.uuid4().hex
         directory = self.config.data_dir / "audio"
         directory.mkdir(exist_ok=True)
+        sync_directory(self.config.data_dir)
         target = directory / f"{recording_id}{source.suffix.lower()}"
         temporary = directory / f"{recording_id}.tmp"
         try:
@@ -117,6 +119,7 @@ class Storage:
     def persist_embedding(self, job_id: str, token: str, vector: np.ndarray) -> Path:
         directory = self.config.data_dir / "embeddings"
         directory.mkdir(exist_ok=True)
+        sync_directory(self.config.data_dir)
         # Only internal IDs/tokens reach here; each claim owns a different path.
         target = directory / f"{job_id}-{token}.npy"
         temporary = directory / f"{job_id}-{token}-{uuid.uuid4().hex}.tmp"

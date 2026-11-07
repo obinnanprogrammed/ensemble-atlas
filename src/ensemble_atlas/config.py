@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 
@@ -16,12 +17,13 @@ class Config:
 
     def __post_init__(self):
         object.__setattr__(self, "data_dir", self.data_dir.expanduser().resolve())
-        if not 0 < self.heartbeat_seconds < self.lease_seconds:
+        if not (math.isfinite(self.lease_seconds) and math.isfinite(self.heartbeat_seconds)
+                and 0 < self.heartbeat_seconds < self.lease_seconds):
             raise ValueError("Heartbeat interval must be positive and shorter than the lease.")
-        if self.max_attempts < 1:
-            raise ValueError("Attempt limit must be at least one.")
-        if self.cpu_threads < 1:
-            raise ValueError("CPU thread count must be at least one.")
+        for name, value in (("Attempt limit", self.max_attempts), ("CPU thread count", self.cpu_threads),
+                            ("Embedding dimension", self.dimension)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer.")
 
     @property
     def contract(self) -> dict:

@@ -6,7 +6,7 @@ EnsembleAtlas is a solo, 24-hour TAMU Datathon 2026 project. The initial impleme
 
 ## Project status
 
-**Milestone 1 is implemented:** the local Python CLI ingests recordings, indexes their timestamped windows with one CPU CLAP worker, persists embeddings, and searches them with text. `atlas ingest`, `atlas worker`, `atlas search TEXT`, and a snapshot `atlas status` are available.
+**Milestones 1 and 2 are implemented:** the local Python CLI ingests recordings, indexes their timestamped windows with one CPU CLAP worker, persists embeddings, and searches them with text. The durable SQLite queue supports atomic claims, attempt tokens, lease renewal, bounded retries, and recovery across worker/process restarts. `atlas ingest`, `atlas worker`, `atlas search TEXT`, and a snapshot `atlas status` are available.
 
 SQLite claims, attempt tokens, lease renewal, bounded retries, and stale-result rejection are included to preserve the lifecycle contract. Multi-worker demonstration/benchmarking, live status, audio-example queries, playback, and the later service/UI extensions remain future work. The remaining sections describe the development contract; only functionality identified above is delivered.
 
@@ -38,6 +38,10 @@ First use downloads the approximately 615 MB checkpoint plus processor files. Th
 
 Workers load one CPU model, drain currently available jobs, and exit when no claim is available. They do not wait for future ingests or for another worker's lease to expire. Restart `atlas worker` after an interrupted worker's lease expires to reclaim its work. Defaults are a 120-second lease, a 20-second background heartbeat, and three total attempts; `--lease-seconds` and `--heartbeat-seconds` configure the worker timings. `--cpu-threads` defaults to two. `Ctrl-C`/termination leaves unfinished leases recoverable. `atlas status` shows persisted counts, retries, worker last-seen/lease times in UTC, and last errors; it does not infer death from a missing result.
 
+`atlas worker --max-attempts 3` configures the total claim limit, including the first attempt. Use the same attempt limit across workers sharing an index. Counts survive restarts; failed jobs remain terminal. Lowering the limit marks exhausted pending jobs failed on the next claim. Lease timings must be finite and the heartbeat interval must be shorter than the lease. If heartbeat renewal fails, the worker discards its computation and exits with a nonzero CLI status; its outstanding lease remains recoverable after expiration. Each concurrent worker needs a distinct `--id`.
+
+Queue writes use SQLite WAL, `BEGIN IMMEDIATE`, foreign keys, a ten-second busy timeout, and explicit `synchronous=FULL`. Embedding writes flush the file and directory before publishing the database reference; first-created artifact directories are also synced in their parent. Completion checks assignment authority again after the file write. Accepted-attempt retries acknowledge the original result without rewriting it. A crash or a losing completion can leave an unreferenced artifact on disk; automatic artifact cleanup is not implemented. These guarantees assume a local filesystem that honors SQLite locking, atomic rename, and fsync.
+
 Text search loads its own model, so run it after the indexing worker exits on a memory-constrained laptop. Search groups completed windows by recording ID and ranks each recording by its highest window cosine score. `--top-k` counts recordings (default five), and `--windows-per-recording` controls how many best-scoring timestamps appear beneath each recording (default three). Each recording appears once with its name, full ID, managed path, and best score; its windows show actual unpadded start/end timestamps and individual cosine scores, ordered best first. Overlapping windows remain separate within their recording. There is no minimum similarity threshold, so the displayed windows are the best available candidates rather than guaranteed semantic matches. Embeddings are exact-search ranked with NumPy; scores are not confidence percentages. This presentation change works with existing indexes and requires no re-ingestion or re-embedding. Audio-example search (`--audio`) is not yet implemented.
 
 ## Running validation
@@ -48,7 +52,7 @@ python -m unittest discover -s tests -v
 python -m pip check
 ```
 
-The lightweight tests use fake embeddings and generated audio. They cover the CLI flow, recording grouping and ranking by maximum window score, per-recording window limits, tail/padding/resampling policy, validation errors, persistent search results, incompatible metadata, atomic cross-process claims, process termination and reassignment, stale and duplicate completions, heartbeat renewal during inference, retry limits, and artifact-write failure. They do not download CLAP.
+The lightweight tests use fake embeddings and generated audio. They cover the CLI flow, recording grouping and ranking by maximum window score, per-recording window limits, tail/padding/resampling policy, validation errors, persistent search results, incompatible metadata, atomic cross-process claims, process termination and reassignment, stale and concurrent duplicate completions, heartbeat renewal during inference and renewal failure, retry limits across restarts, invalid timings, artifact-write failure, lease expiration during artifact writes, database rollback during completion, and process termination after artifact rename before database acceptance. They do not download CLAP.
 
 Run the separate real-model smoke test with an identifiable clip no longer than ten seconds:
 
@@ -197,7 +201,7 @@ Keep chunk claims bounded: initially one active chunk per worker. A long recordi
 ## Implementation milestones
 
 1. **Vertical slice — implemented:** ingest one recording, process with one worker, persist embeddings, and return text-search timestamps.
-2. **Durable queue:** atomic claims, lease tokens, heartbeats, retries, and restart-safe state.
+2. **Durable queue — implemented:** atomic claims, lease tokens, heartbeats, retries, and restart-safe state.
 3. **Systems demo:** two workers, live CLI status, worker termination, reassignment, and complete indexing.
 4. **Audio queries:** embed a query clip and retrieve matching recording segments.
 5. **Polish:** useful errors, setup instructions, reproducible commands, and measured resource usage.

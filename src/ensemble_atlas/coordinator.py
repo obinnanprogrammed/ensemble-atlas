@@ -1,6 +1,7 @@
 """Serializable coordinator boundary; workers never issue SQL."""
 
 from pathlib import Path
+import math
 import time
 from typing import Protocol
 import uuid
@@ -45,6 +46,10 @@ class LocalCoordinator:
             db.execute("UPDATE workers SET last_seen=? WHERE id=?", (now, worker_id))
             if db.execute("SELECT 1 FROM jobs WHERE worker_id=? AND state='leased'", (worker_id,)).fetchone():
                 raise ValueError(f"Worker ID {worker_id!r} already has an active chunk; use a distinct ID.")
+            # A restarted coordinator may have a lower configured attempt limit.
+            # Exhausted pending work must become terminal rather than be stranded.
+            db.execute("""UPDATE jobs SET state='failed', last_error=COALESCE(last_error, 'Attempt limit exhausted')
+                          WHERE state='pending' AND attempt_count >= ?""", (self.config.max_attempts,))
             row = db.execute("""SELECT j.*, r.audio_path FROM jobs j JOIN recordings r ON r.id=j.recording_id
                                 WHERE j.state='pending' AND j.attempt_count < ?
                                 ORDER BY j.recording_id, j.start LIMIT 1""", (self.config.max_attempts,)).fetchone()
@@ -58,23 +63,22 @@ class LocalCoordinator:
             return {"job_id": row["id"], "audio_path": row["audio_path"], "start": row["start"],
                     "end": row["end"], "attempt_token": token, "lease_expiration": expiration}
 
-    def _active(self, db, job_id, token):
+    def _active(self, db, job_id, token, *, now=None):
         return db.execute("""SELECT * FROM jobs WHERE id=? AND state='leased'
                              AND attempt_token=? AND lease_expiration > ?""",
-                          (job_id, token, self.clock())).fetchone()
+                          (job_id, token, self.clock() if now is None else now)).fetchone()
 
     def heartbeat(self, job_id: str, attempt_token: str) -> bool:
         with self.storage.connection(write=True) as db:
-            row = self._active(db, job_id, attempt_token)
+            now = self.clock()
+            row = self._active(db, job_id, attempt_token, now=now)
             if row is None:
                 return False
-            now = self.clock()
             db.execute("UPDATE jobs SET lease_expiration=? WHERE id=?", (now + self.config.lease_seconds, job_id))
             db.execute("UPDATE workers SET last_seen=? WHERE id=?", (now, row["worker_id"]))
             return True
 
     def complete(self, job_id: str, attempt_token: str, embedding: list[float], elapsed_seconds: float = 0) -> bool:
-        vector = normalize(embedding, self.config.dimension)
         # Reject stale calls before writing an artifact. Recheck after the disk write.
         with self.storage.connection() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -82,6 +86,9 @@ class LocalCoordinator:
                 return True
             if self._active(db, job_id, attempt_token) is None:
                 return False
+        vector = normalize(embedding, self.config.dimension)
+        if not math.isfinite(elapsed_seconds) or elapsed_seconds < 0:
+            raise ValueError("Elapsed seconds must be finite and nonnegative.")
         # Unique per submission too, so a duplicate call cannot replace accepted bytes.
         path = self.storage.persist_embedding(job_id, f"{attempt_token}-{uuid.uuid4().hex}", vector)
         with self.storage.connection(write=True) as db:

@@ -12,7 +12,7 @@ def run_worker(coordinator: Coordinator, config: Config, worker_id: str, embedde
                report: Callable[[str], None] = print) -> dict:
     """Drain available work and exit; each heartbeat uses a fresh DB connection."""
     coordinator.register(worker_id)
-    completed = failed = 0
+    completed = failed = discarded = 0
     started = time.monotonic()
     while (job := coordinator.claim(worker_id)) is not None:
         stop = Event()
@@ -40,6 +40,7 @@ def run_worker(coordinator: Coordinator, config: Config, worker_id: str, embedde
                 completed += 1
                 report(f"Completed {job['job_id']} ({job['start']:.3f}–{job['end']:.3f}s)")
             else:
+                discarded += 1
                 report(f"Discarded result for expired/replaced assignment {job['job_id']}")
         except Exception as error:
             coordinator.fail(job["job_id"], job["attempt_token"], str(error))
@@ -48,6 +49,10 @@ def run_worker(coordinator: Coordinator, config: Config, worker_id: str, embedde
         finally:
             stop.set()
             thread.join()
+        if lost.is_set():
+            # A failed renewal may still leave our lease active. Exit rather than
+            # claiming again under the same ID; scheduling recovers it on expiry.
+            break
     elapsed = time.monotonic() - started
-    return {"completed": completed, "failed_attempts": failed, "elapsed_seconds": elapsed,
+    return {"completed": completed, "failed_attempts": failed, "discarded": discarded, "elapsed_seconds": elapsed,
             "chunks_per_second": completed / elapsed if elapsed > 0 else 0.0}
