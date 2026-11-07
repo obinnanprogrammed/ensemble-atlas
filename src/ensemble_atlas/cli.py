@@ -68,21 +68,24 @@ def timestamp(seconds: float) -> str:
 
 @app.command()
 def search(ctx: typer.Context, query: str,
-           top_k: Annotated[int, typer.Option(min=1)] = 5):
-    """Rank completed windows by text/audio cosine similarity."""
+           top_k: Annotated[int, typer.Option(min=1, help="Number of recordings to return.")] = 5,
+           windows_per_recording: Annotated[int, typer.Option(min=1, help="Best windows to show per recording.")] = 3):
+    """Rank recordings by their best window and show matching timestamps."""
     if not query.strip():
         raise ValueError("Search text cannot be blank.")
     storage = Storage(ctx.obj)
     if not storage.completed():
         console.print("No completed embeddings. Run atlas ingest and atlas worker first.")
         return
-    hits = search_index(storage, ClapEmbedder(ctx.obj), query, top_k)
-    console.print("Cosine similarity is a ranking score.")
-    # One hit per block keeps full paths, IDs and timestamps copyable in narrow terminals.
+    hits = search_index(storage, ClapEmbedder(ctx.obj), query, top_k, windows_per_recording)
+    console.print("Recordings ranked by best window. Cosine similarity is a ranking score.")
     for index, hit in enumerate(hits, 1):
         console.print(f"{index}. {hit['original_name']} [{hit['recording_id']}]\n"
-                      f"   {timestamp(hit['start'])} – {timestamp(hit['end'])} | cosine {hit['score']:.4f}\n"
+                      f"   Best cosine {hit['score']:.4f}\n"
                       f"   {hit['audio_path']}", markup=False, soft_wrap=True)
+        for match in hit["matches"]:
+            console.print(f"   {timestamp(match['start'])} – {timestamp(match['end'])} | cosine {match['score']:.4f}",
+                          markup=False, soft_wrap=True)
 
 
 @app.command()

@@ -38,7 +38,7 @@ First use downloads the approximately 615 MB checkpoint plus processor files. Th
 
 Workers load one CPU model, drain currently available jobs, and exit when no claim is available. They do not wait for future ingests or for another worker's lease to expire. Restart `atlas worker` after an interrupted worker's lease expires to reclaim its work. Defaults are a 120-second lease, a 20-second background heartbeat, and three total attempts; `--lease-seconds` and `--heartbeat-seconds` configure the worker timings. `--cpu-threads` defaults to two. `Ctrl-C`/termination leaves unfinished leases recoverable. `atlas status` shows persisted counts, retries, worker last-seen/lease times in UTC, and last errors; it does not infer death from a missing result.
 
-Text search loads its own model, so run it after the indexing worker exits on a memory-constrained laptop. Search returns only completed windows, with full recording IDs, managed paths, unpadded timestamps, and cosine scores. Overlapping hits are returned separately. Embeddings are exact-search ranked with NumPy; scores are not confidence percentages. Audio-example search (`--audio`) is not yet implemented.
+Text search loads its own model, so run it after the indexing worker exits on a memory-constrained laptop. Search groups completed windows by recording ID and ranks each recording by its highest window cosine score. `--top-k` counts recordings (default five), and `--windows-per-recording` controls how many best-scoring timestamps appear beneath each recording (default three). Each recording appears once with its name, full ID, managed path, and best score; its windows show actual unpadded start/end timestamps and individual cosine scores, ordered best first. Overlapping windows remain separate within their recording. There is no minimum similarity threshold, so the displayed windows are the best available candidates rather than guaranteed semantic matches. Embeddings are exact-search ranked with NumPy; scores are not confidence percentages. This presentation change works with existing indexes and requires no re-ingestion or re-embedding. Audio-example search (`--audio`) is not yet implemented.
 
 ## Running validation
 
@@ -48,7 +48,7 @@ python -m unittest discover -s tests -v
 python -m pip check
 ```
 
-The 19 lightweight tests use fake embeddings and generated audio. They cover the CLI flow, tail/padding/resampling policy, validation errors, persistent search results, incompatible metadata, atomic cross-process claims, process termination and reassignment, stale and duplicate completions, heartbeat renewal during inference, retry limits, and artifact-write failure. They do not download CLAP.
+The lightweight tests use fake embeddings and generated audio. They cover the CLI flow, recording grouping and ranking by maximum window score, per-recording window limits, tail/padding/resampling policy, validation errors, persistent search results, incompatible metadata, atomic cross-process claims, process termination and reassignment, stale and duplicate completions, heartbeat renewal during inference, retry limits, and artifact-write failure. They do not download CLAP.
 
 Run the separate real-model smoke test with an identifiable clip no longer than ten seconds:
 
@@ -89,7 +89,7 @@ atlas worker --id worker-1
 # Inspect recording progress, worker activity, and retries.
 atlas status
 
-# Find matching segments.
+# Find five recordings, each with up to three best-matching windows.
 atlas search "brass playing a slow melody" --top-k 5
 ```
 
@@ -112,7 +112,7 @@ The vertical slice validates the managed copy in bounded blocks, creates logical
 
 Use the model's text and audio projection outputs in their shared embedding space. Record model ID/revision and preprocessing version with each index; reject searches across incompatible versions. Confirm the installed library's feature-return API during implementation and pin the working dependency versions.
 
-Start with exact NumPy similarity search over completed embeddings. A vector database is unnecessary for this demo. Adjacent overlapping hits may be merged for presentation after basic search works.
+Use exact NumPy similarity search over completed embeddings. Group results by recording, rank recordings by their best window, and show their highest-scoring windows underneath. A vector database is unnecessary for this demo. Adjacent overlapping windows may be merged for presentation in a later improvement.
 
 ## Architecture and module ownership
 

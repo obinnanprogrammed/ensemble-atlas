@@ -54,12 +54,14 @@ def main():
         hits = search(reopened, embedder, args.query, top_k=10)
         distractors = search(reopened, embedder, args.distractor, top_k=10)
         assert summary["completed"] == ingested["chunks"], summary
-        assert hits[0]["end"] > 10 and hits[0]["start"] >= 5, hits
+        assert len(hits) == 1, hits
+        matches = hits[0]["matches"]
+        assert matches[0]["end"] > 10 and matches[0]["start"] >= 5, hits
         assert hits[0]["score"] > distractors[0]["score"], (hits, distractors)
-        assert hits[0]["score"] > next(hit["score"] for hit in hits if hit["start"] == 0), hits
+        assert hits[0]["score"] > next(match["score"] for match in matches if match["start"] == 0), hits
         print(json.dumps({"model_load_seconds": model_seconds, "worker": summary,
                           "query": args.query, "distractor": args.distractor,
-                          "hits": [{key: hit[key] for key in ("start", "end", "score")} for hit in hits],
+                          "recording_score": hits[0]["score"], "matches": matches,
                           "distractor_best_score": distractors[0]["score"]}, indent=2))
         print("PASS: real projected embeddings, persistence, and timestamp retrieval.")
         print("Inspect the fixture and results manually to assess semantic relevance.")

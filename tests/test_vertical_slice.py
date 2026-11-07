@@ -66,9 +66,10 @@ class VerticalSliceTests(AudioTestCase):
         self.assertEqual(summary["completed"], 3)
         reopened = Storage(self.config)
         hits = search(reopened, FakeEmbedder(), "tone", top_k=2)
-        self.assertEqual({hit["start"] for hit in hits}, {5, 10})
-        self.assertTrue(all(hit["end"] == 11 for hit in hits))
-        self.assertTrue(all(hit["score"] == 1 for hit in hits))
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["score"], 1)
+        self.assertEqual({match["start"] for match in hits[0]["matches"][:2]}, {5, 10})
+        self.assertTrue(all(match["end"] == 11 for match in hits[0]["matches"][:2]))
         self.assertEqual(LocalCoordinator(reopened).status()["counts"]["completed"], 3)
         self.assertEqual(reopened.completed()[0]["original_name"], "recording.wav")
         for row in reopened.completed():
@@ -126,6 +127,8 @@ class VerticalSliceTests(AudioTestCase):
         for query, top_k in [(" ", 5), ("tone", 0)]:
             with self.assertRaises(ValueError):
                 search(self.storage, FakeEmbedder(), query, top_k)
+        with self.assertRaises(ValueError):
+            search(self.storage, FakeEmbedder(), "tone", windows_per_recording=0)
         runner = CliRunner()
         for command in (["search", "tone"], ["worker"], ["status"]):
             with patch("ensemble_atlas.cli.ClapEmbedder", side_effect=AssertionError("unexpected model load")):
@@ -152,8 +155,40 @@ class VerticalSliceTests(AudioTestCase):
             self.assertIn("cosine 1.0000", result.output)
             self.assertIn("00:00:05.000", result.output)
             self.assertIn("recording.wav", result.output)
+            self.assertEqual(result.output.count("recording.wav ["), 1)
+            self.assertIn("00:00:10.000", result.output)
+            result = runner.invoke(app, [*arguments, "search", "tone", "--windows-per-recording", "1"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("00:00:05.000", result.output)
+            self.assertNotIn("00:00:10.000", result.output)
         result = runner.invoke(app, [*arguments, "search", "tone", "--top-k", "0"])
         self.assertEqual(result.exit_code, 2)
+        result = runner.invoke(app, [*arguments, "search", "tone", "--windows-per-recording", "0"])
+        self.assertEqual(result.exit_code, 2)
+
+    def test_recordings_rank_by_maximum_window_before_top_k_is_applied(self):
+        source = self.audio_file()
+        # Identical filenames still represent distinct recordings. The first has
+        # several strong windows; the second has the best single window but a
+        # lower average, and must rank first.
+        scores = [[0.9, 0.85, 0.8], [0.1, 0.95, 0.0], [0.7, 0.6, 0.5]]
+        ids = [self.coordinator.ingest(source)["recording_id"] for _ in scores]
+        by_id = dict(zip(ids, scores))
+        self.coordinator.register("scorer")
+        while (job := self.coordinator.claim("scorer")) is not None:
+            recording_id, window = job["job_id"].rsplit("-", 1)
+            score = by_id[recording_id][int(window)]
+            vector = [np.sqrt(1 - score ** 2), score, 0]
+            self.coordinator.complete(job["job_id"], job["attempt_token"], vector)
+        hits = search(self.storage, FakeEmbedder(), "tone", top_k=2, windows_per_recording=2)
+        self.assertEqual([hit["recording_id"] for hit in hits], [ids[1], ids[0]])
+        np.testing.assert_allclose([hit["score"] for hit in hits], [0.95, 0.9])
+        self.assertTrue(all(len(hit["matches"]) == 2 for hit in hits))
+        self.assertEqual([match["start"] for match in hits[0]["matches"]], [5, 0])
+        self.assertEqual(hits[0]["matches"][0]["end"], 11)
+        all_hits = search(self.storage, FakeEmbedder(), "tone", top_k=10, windows_per_recording=10)
+        self.assertEqual(len(all_hits), 3)
+        self.assertTrue(all(len(hit["matches"]) == 3 for hit in all_hits))
 
     def test_main_formats_actionable_errors_without_tracebacks(self):
         runner = CliRunner()
