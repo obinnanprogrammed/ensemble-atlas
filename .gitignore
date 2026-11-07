@@ -1,2 +1,8 @@
 audio-files/
 eavenv/
+data/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/

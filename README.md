@@ -6,7 +6,60 @@ EnsembleAtlas is a solo, 24-hour TAMU Datathon 2026 project. The initial impleme
 
 ## Project status
 
-This README is the development specification, not a description of completed software. Commands, modules, and schemas below are planned interfaces. Update implementation status and installation instructions as functionality lands; do not imply that unimplemented commands work.
+**Milestone 1 is implemented:** the local Python CLI ingests recordings, indexes their timestamped windows with one CPU CLAP worker, persists embeddings, and searches them with text. `atlas ingest`, `atlas worker`, `atlas search TEXT`, and a snapshot `atlas status` are available.
+
+SQLite claims, attempt tokens, lease renewal, bounded retries, and stale-result rejection are included to preserve the lifecycle contract. Multi-worker demonstration/benchmarking, live status, audio-example queries, playback, and the later service/UI extensions remain future work. The remaining sections describe the development contract; only functionality identified above is delivered.
+
+## Setup and first search
+
+Tested on Linux with Python 3.12.3 and CPU inference. From the repository root:
+
+```bash
+python3.12 -m venv eavenv
+source eavenv/bin/activate
+# Install the smaller CPU build before resolving the remaining dependencies.
+python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -r requirements.lock
+python -m pip install --no-build-isolation --no-deps -e .
+
+atlas ingest audio-files/rehearsal.wav
+atlas worker --id worker-1
+atlas status
+atlas search "brass playing a slow melody" --top-k 5
+```
+
+Supply your own recording; `audio-files/` contains no bundled demo. `requirements.lock` records the tested Linux CPU environment, including transitive dependencies. Direct dependencies are pinned in `pyproject.toml`: Typer, Rich, PyTorch, Transformers, NumPy, and the approved SoundFile/SciPy audio dependencies. No additional test framework is needed.
+
+SoundFile decodes the managed input; SciPy performs polyphase resampling. WAV and FLAC are recommended. Other formats depend on the installed libsndfile build. The tested Linux SoundFile wheel bundles libsndfile, so no FFmpeg or external decoder was required; source/platform-specific SoundFile installations may require system libsndfile. Invalid, empty, and non-finite audio is rejected before jobs are published.
+
+All processes must use the same data directory on a local filesystem. The default is `./data` relative to the current directory; set `ATLAS_DATA_DIR` or use `atlas --data-dir /absolute/path ...` to make the location explicit. It holds SQLite, managed audio copies, `.npy` embeddings, and the Hugging Face model cache. These artifacts are ignored by Git. Keep managed files in place after indexing; deleting the original source recording is safe.
+
+First use downloads the approximately 615 MB checkpoint plus processor files. The model is pinned to `laion/clap-htsat-unfused` revision `8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a`. The installed Transformers 4.52.4 API was checked: `ClapProcessor` takes `audios=`, and `get_audio_features`/`get_text_features` return projected tensors of shape `(batch, 512)`. Both paths use inference mode and L2 normalization. Model/revision, dimension, and preprocessing version are checked against the index contract; use a separate data directory for a different contract.
+
+Workers load one CPU model, drain currently available jobs, and exit when no claim is available. They do not wait for future ingests or for another worker's lease to expire. Restart `atlas worker` after an interrupted worker's lease expires to reclaim its work. Defaults are a 120-second lease, a 20-second background heartbeat, and three total attempts; `--lease-seconds` and `--heartbeat-seconds` configure the worker timings. `--cpu-threads` defaults to two. `Ctrl-C`/termination leaves unfinished leases recoverable. `atlas status` shows persisted counts, retries, worker last-seen/lease times in UTC, and last errors; it does not infer death from a missing result.
+
+Text search loads its own model, so run it after the indexing worker exits on a memory-constrained laptop. Search returns only completed windows, with full recording IDs, managed paths, unpadded timestamps, and cosine scores. Overlapping hits are returned separately. Embeddings are exact-search ranked with NumPy; scores are not confidence percentages. Audio-example search (`--audio`) is not yet implemented.
+
+## Running validation
+
+```bash
+source eavenv/bin/activate
+python -m unittest discover -s tests -v
+python -m pip check
+```
+
+The 19 lightweight tests use fake embeddings and generated audio. They cover the CLI flow, tail/padding/resampling policy, validation errors, persistent search results, incompatible metadata, atomic cross-process claims, process termination and reassignment, stale and duplicate completions, heartbeat renewal during inference, retry limits, and artifact-write failure. They do not download CLAP.
+
+Run the separate real-model smoke test with an identifiable clip no longer than ten seconds:
+
+```bash
+python tests/smoke_clap.py --fixture /path/to/short-dog-bark.wav \
+    --query "a dog barking" --distractor "a person playing a violin"
+```
+
+This caches the real checkpoint under `data/models` and uses a temporary index. It places the event after ten seconds of silence, indexes all windows, reopens the database, and checks that the matching query retrieves the event over silence and an unrelated query. After the checkpoint is cached, `HF_HUB_OFFLINE=1` runs it without network access. Listen to the fixture and inspect its timestamps for a manual semantic relevance check; passing a vector-shape check alone is insufficient.
+
+Development smoke result: [ESC-50's `1-100032-A-0.wav`](https://github.com/karolpiczak/ESC-50/blob/master/audio/1-100032-A-0.wav), a five-second dog-bark fixture, was downloaded outside the repository. See the dataset's [attribution and license](https://github.com/karolpiczak/ESC-50#license). With ten seconds of silence prepended, “a dog barking” retrieved 5–15s (0.5280) and 10–15s (0.4776), ahead of silence at 0–10s (0.2523); the violin query's best score was 0.2210. One worker indexed three chunks in 1.75s (1.716 chunks/s), excluding the 22.44s cached model load and ingestion. This is one small fixture on the development machine, not a throughput benchmark or evidence of a multi-worker speedup. No two-worker comparison has been run.
 
 ## Scope and decisions
 
@@ -24,23 +77,23 @@ Multiple workers on one machine are a local demonstration of a distributed-style
 
 ## Intended user workflow
 
-The following commands are proposed, not currently implemented:
+The currently implemented text-search workflow is:
 
 ```bash
 # Ingest a recording and enqueue its windows.
 atlas ingest rehearsal.wav
 
-# Run each worker in its own terminal.
+# Run one worker until the available queue is drained.
 atlas worker --id worker-1
-atlas worker --id worker-2
 
 # Inspect recording progress, worker activity, and retries.
 atlas status
 
 # Find matching segments.
 atlas search "brass playing a slow melody" --top-k 5
-atlas search --audio example.wav --top-k 5
 ```
+
+The planned audio-example interface is `atlas search --audio example.wav --top-k 5`. Running two workers in separate terminals and demonstrating failure recovery is a later milestone.
 
 Search output should include recording ID/name, start and end timestamps, and cosine similarity. Treat similarity as a ranking score, not a probability or confidence percentage. Timestamped playback is a later usability improvement; the CLI MVP can return file paths and timestamps.
 
@@ -54,6 +107,8 @@ Search output should include recording ID/name, start and end timestamps, and co
 6. Embed a text or audio query with the same checkpoint and preprocessing contract, then rank completed chunks by dot product of normalized vectors.
 
 Define a deterministic tail policy: emit windows starting at 0, 5, 10, ... seconds while the start is before the recording ends; pad short windows to 10 seconds for inference. Store the actual unpadded end timestamp. Reject empty or undecodable recordings with a clear CLI error.
+
+The vertical slice validates the managed copy in bounded blocks, creates logical window timestamps, and decodes/converts/resamples each requested source window to mono 48 kHz on demand. This keeps decoded audio bounded to one window. Tail windows are explicitly zero-padded before the CLAP processor, rather than relying on its default repeat-padding behavior. The contract identifier is `mono-polyphase-48k-window10-stride5-zero-pad-v1`.
 
 Use the model's text and audio projection outputs in their shared embedding space. Record model ID/revision and preprocessing version with each index; reject searches across incompatible versions. Confirm the installed library's feature-return API during implementation and pin the working dependency versions.
 
@@ -141,7 +196,7 @@ Keep chunk claims bounded: initially one active chunk per worker. A long recordi
 
 ## Implementation milestones
 
-1. **Vertical slice:** ingest one recording, process with one worker, persist embeddings, and return text-search timestamps.
+1. **Vertical slice — implemented:** ingest one recording, process with one worker, persist embeddings, and return text-search timestamps.
 2. **Durable queue:** atomic claims, lease tokens, heartbeats, retries, and restart-safe state.
 3. **Systems demo:** two workers, live CLI status, worker termination, reassignment, and complete indexing.
 4. **Audio queries:** embed a query clip and retrieve matching recording segments.

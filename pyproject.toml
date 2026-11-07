@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=78.1.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ensemble-atlas"
+version = "0.1.0"
+description = "Search timestamped audio windows with CLAP embeddings"
+requires-python = ">=3.12"
+dependencies = [
+    "typer==0.16.0",
+    "rich==14.0.0",
+    "torch==2.6.0",
+    "transformers==4.52.4",
+    "numpy==2.2.6",
+    "soundfile==0.13.1",
+    "scipy==1.15.3",
+]
+
+[project.scripts]
+atlas = "ensemble_atlas.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
