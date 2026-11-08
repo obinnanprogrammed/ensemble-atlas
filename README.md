@@ -36,7 +36,7 @@ All processes must use the same data directory on a local filesystem. The defaul
 
 First use downloads the approximately 615 MB checkpoint plus processor files. The model is pinned to `laion/clap-htsat-unfused` revision `8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a`. The installed Transformers 4.52.4 API was checked: `ClapProcessor` takes `audios=`, and `get_audio_features`/`get_text_features` return projected tensors of shape `(batch, 512)`. Both paths use inference mode and L2 normalization. Model/revision, dimension, and preprocessing version are checked against the index contract; use a separate data directory for a different contract.
 
-Workers load one CPU model each, drain currently available jobs, and by default exit when no claim is available. `--wait-for-leases` keeps an idle worker polling while pending or leased jobs remain, allowing it to reclaim expired assignments automatically; it exits when all current jobs are completed or failed. Neither mode waits for future ingests after the queue becomes terminal. Without that option, restart `atlas worker` after an interrupted worker's lease expires to reclaim its work. Defaults are a 120-second lease, a 20-second background heartbeat, and three total attempts; `--lease-seconds` and `--heartbeat-seconds` configure the worker timings. `--cpu-threads` defaults to two. `Ctrl-C`/termination leaves unfinished leases recoverable.
+Workers load one CPU model each, drain currently available jobs, and by default exit when no claim is available. Use `atlas worker --count N --single-inference` to run multiple lightweight queue workers behind one CLAP process; the coordinator still owns claims, leases, heartbeats, retries, and accepted results. A failed shared inference process leaves active jobs recoverable after lease expiration. `--wait-for-leases` keeps an idle worker polling while pending or leased jobs remain, allowing it to reclaim expired assignments automatically; it exits when all current jobs are completed or failed. Neither mode waits for future ingests after the queue becomes terminal. Without that option, restart `atlas worker` after an interrupted worker's lease expires to reclaim its work. Defaults are a 120-second lease, a 20-second background heartbeat, and three total attempts; `--lease-seconds` and `--heartbeat-seconds` configure the worker timings. `--cpu-threads` defaults to two. `Ctrl-C`/termination leaves unfinished leases recoverable.
 
 `atlas status` shows recording progress, persisted counts, retries, per-worker completed counts, worker last-seen/lease times in UTC, and last errors. `atlas status --watch --interval 0.5` refreshes the display until Ctrl-C (default interval: one second). Status labels describe assignment authority: `leased`, `expired lease`, or `no lease`; they do not claim a worker is alive or dead. Reading status does not reclaim work; scheduling does that on the next claim. Completed chunk time is the sum of accepted attempts' decoding/inference time, not wall-clock throughput.
 
@@ -190,6 +190,7 @@ src/ensemble_atlas/
     storage.py          # SQLite transactions and artifact persistence
     audio.py            # Decode, resample, and slice recordings
     embeddings.py       # CLAP loading, preprocessing, normalization
+    shared_inference.py # Optional one-model process with queue-worker clients
     worker.py           # Claim, heartbeat, infer, complete loop
     search.py           # Query embedding and similarity ranking
 tests/
@@ -253,7 +254,7 @@ Use schema constraints for unique chunk results and valid relationships. Store s
 
 ## Resource management
 
-Load CLAP once per worker, not once per chunk. Start with CPU inference unless a usable accelerator is confirmed. Two processes duplicate model memory and can oversubscribe CPU threads; measure memory, chunk latency, and throughput before increasing concurrency. On a single GPU, start with one inference worker and consider batching before additional model processes.
+Load CLAP once per worker, not once per chunk. Start with CPU inference unless a usable accelerator is confirmed. Two processes duplicate model memory and can oversubscribe CPU threads; measure memory, chunk latency, and throughput before increasing concurrency. The optional shared-inference mode puts one CLAP model in a dedicated process and sends bounded per-chunk requests from multiple queue workers; it does not move lease or result authority out of the coordinator. On a single GPU, start with one inference worker and consider batching before additional model processes.
 
 Keep chunk claims bounded: initially one active chunk per worker. A long recording should not cause all decoded windows to remain in memory. Text and audio search load a separate model process; document its memory cost and avoid running it concurrently with indexing if the laptop cannot sustain both.
 

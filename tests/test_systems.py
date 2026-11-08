@@ -10,12 +10,25 @@ from typer.testing import CliRunner
 from ensemble_atlas.cli import app, status_view
 from ensemble_atlas.coordinator import LocalCoordinator
 from ensemble_atlas.storage import Storage
+from ensemble_atlas.shared_inference import run_shared_workers
 from ensemble_atlas.worker import run_worker
 from systems_demo import run_phase
 from test_vertical_slice import AudioTestCase, FakeEmbedder
 
 
+def fake_embedder_factory(config):
+    return FakeEmbedder()
+
+
 class SystemsTests(AudioTestCase):
+    def test_shared_inference_process_completes_with_multiple_queue_workers(self):
+        self.coordinator.ingest(self.audio_file(duration=21))
+        result = run_shared_workers(self.config, ["shared-1", "shared-2"],
+                                    embedder_factory=fake_embedder_factory)
+        self.assertEqual(result["completed"], 5)
+        self.assertEqual(sum(item["completed"] for item in result["workers"].values()), 5)
+        self.assertEqual(self.coordinator.status()["counts"]["completed"], 5)
+
     def test_two_process_workers_complete_and_recover_terminated_assignment(self):
         fixture = self.audio_file(duration=21)
         for recovery in (False, True):

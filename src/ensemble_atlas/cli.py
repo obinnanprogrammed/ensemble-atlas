@@ -16,6 +16,7 @@ from .coordinator import LocalCoordinator
 from .embeddings import ClapEmbedder
 from .search import search as search_index
 from .search import validate_query
+from .shared_inference import run_shared_workers
 from .storage import Storage
 from .worker import run_worker
 
@@ -42,14 +43,20 @@ def ingest(ctx: typer.Context, recording: Path):
 @app.command()
 def worker(ctx: typer.Context,
            worker_id: Annotated[str, typer.Option("--id", help="Unique label for this worker.")] = "worker-1",
+           count: Annotated[int, typer.Option(min=1, help="Workers sharing one inference process.")] = 1,
+           single_inference: Annotated[bool, typer.Option(help="Use one CLAP process for all workers.")] = False,
            lease_seconds: Annotated[float, typer.Option(min=0.1)] = 120.0,
            heartbeat_seconds: Annotated[float, typer.Option(min=0.01)] = 20.0,
            max_attempts: Annotated[int, typer.Option(min=1, help="Total claims allowed per chunk, including retries.")] = 3,
            wait_for_leases: Annotated[bool, typer.Option(help="Wait for outstanding leases and recover expired work; exit when the queue is terminal.")] = False,
            cpu_threads: Annotated[int, typer.Option(min=1)] = 2):
-    """Load CLAP once on CPU, process available chunks, then exit."""
+    """Process available chunks, then exit."""
     if not worker_id.strip():
         raise ValueError("Worker ID cannot be blank.")
+    if count > 1 and not single_inference:
+        raise ValueError("--count greater than one requires --single-inference.")
+    if count > 1 and worker_id != "worker-1":
+        raise ValueError("Use --id only when running one worker.")
     config = Config(data_dir=ctx.obj.data_dir, lease_seconds=lease_seconds,
                     heartbeat_seconds=heartbeat_seconds, max_attempts=max_attempts, cpu_threads=cpu_threads)
     coordinator = LocalCoordinator(Storage(config))
@@ -57,10 +64,16 @@ def worker(ctx: typer.Context,
     if not (counts["pending"] or counts["leased"]):
         console.print("No work available. Ingest a recording first, or inspect atlas status.")
         return
-    console.print("Loading CLAP on CPU (first use downloads the checkpoint).")
-    embedder = ClapEmbedder(config)
-    summary = run_worker(coordinator, config, worker_id, embedder, lambda message: console.print(message, markup=False),
-                         wait_for_leases=wait_for_leases)
+    if single_inference:
+        console.print(f"Loading one shared CLAP process for {count} worker(s) (first use downloads the checkpoint).")
+        worker_ids = [worker_id] if count == 1 else [f"worker-{i}" for i in range(1, count + 1)]
+        summary = run_shared_workers(config, worker_ids, wait_for_leases=wait_for_leases)
+    else:
+        console.print("Loading CLAP on CPU (first use downloads the checkpoint).")
+        embedder = ClapEmbedder(config)
+        summary = run_worker(coordinator, config, worker_id, embedder,
+                             lambda message: console.print(message, markup=False),
+                             wait_for_leases=wait_for_leases)
     console.print(f"Completed {summary['completed']} chunk(s) in {summary['elapsed_seconds']:.2f}s "
                   f"({summary['chunks_per_second']:.3f} chunks/s); {summary['failed_attempts']} failed attempt(s); "
                   f"{summary['discarded']} discarded result(s).")

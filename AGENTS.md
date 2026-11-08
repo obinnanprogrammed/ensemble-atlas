@@ -1,6 +1,10 @@
 ## Overview
 This is an app where users can search inside audio recordings using natural language or an example sound, backed by a recoverable pool of embedding workers. It returns the best matching recordings with the best matching chunks from each recording. The development specification is in README.md.
 
+## Project Environment
+- Python 3.12+
+- Virtual Environment: eavenv
+
 ## General Guidelines
 - Implement according to the specification in README.md.
 - If anything is unclear, halt and request clarification.
