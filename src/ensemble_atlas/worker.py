@@ -1,4 +1,5 @@
 from threading import Event, Thread
+import math
 import time
 from typing import Callable
 
@@ -9,12 +10,24 @@ from .embeddings import Embedder
 
 
 def run_worker(coordinator: Coordinator, config: Config, worker_id: str, embedder: Embedder,
-               report: Callable[[str], None] = print) -> dict:
+               report: Callable[[str], None] = print, *, wait_for_leases: bool = False,
+               poll_seconds: float = 0.5) -> dict:
     """Drain available work and exit; each heartbeat uses a fresh DB connection."""
+    if not math.isfinite(poll_seconds) or poll_seconds <= 0:
+        raise ValueError("Poll interval must be finite and positive.")
     coordinator.register(worker_id)
     completed = failed = discarded = 0
     started = time.monotonic()
-    while (job := coordinator.claim(worker_id)) is not None:
+    while True:
+        job = coordinator.claim(worker_id)
+        if job is None:
+            if not wait_for_leases:
+                break
+            counts = coordinator.status()["counts"]
+            if not (counts["pending"] or counts["leased"]):
+                break
+            time.sleep(poll_seconds)
+            continue
         stop = Event()
         lost = Event()
 
@@ -32,11 +45,13 @@ def run_worker(coordinator: Coordinator, config: Config, worker_id: str, embedde
         thread = Thread(target=heartbeat, daemon=True)
         thread.start()
         chunk_started = time.monotonic()
+        accepted = False
         try:
             samples = read_window(job["audio_path"], job["start"], job["end"])
             vector = embedder.audio(samples)
             if not lost.is_set() and coordinator.complete(job["job_id"], job["attempt_token"], vector.tolist(),
                                                         time.monotonic() - chunk_started):
+                accepted = True
                 completed += 1
                 report(f"Completed {job['job_id']} ({job['start']:.3f}–{job['end']:.3f}s)")
             else:
@@ -49,7 +64,7 @@ def run_worker(coordinator: Coordinator, config: Config, worker_id: str, embedde
         finally:
             stop.set()
             thread.join()
-        if lost.is_set():
+        if lost.is_set() and not accepted:
             # A failed renewal may still leave our lease active. Exit rather than
             # claiming again under the same ID; scheduling recovers it on expiry.
             break

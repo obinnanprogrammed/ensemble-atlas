@@ -1,9 +1,13 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import math
 import sqlite3
+import time
 from typing import Annotated
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
+from rich.text import Text
 from rich.table import Table
 import typer
 
@@ -40,6 +44,7 @@ def worker(ctx: typer.Context,
            lease_seconds: Annotated[float, typer.Option(min=0.1)] = 120.0,
            heartbeat_seconds: Annotated[float, typer.Option(min=0.01)] = 20.0,
            max_attempts: Annotated[int, typer.Option(min=1, help="Total claims allowed per chunk, including retries.")] = 3,
+           wait_for_leases: Annotated[bool, typer.Option(help="Wait for outstanding leases and recover expired work; exit when the queue is terminal.")] = False,
            cpu_threads: Annotated[int, typer.Option(min=1)] = 2):
     """Load CLAP once on CPU, process available chunks, then exit."""
     if not worker_id.strip():
@@ -53,7 +58,8 @@ def worker(ctx: typer.Context,
         return
     console.print("Loading CLAP on CPU (first use downloads the checkpoint).")
     embedder = ClapEmbedder(config)
-    summary = run_worker(coordinator, config, worker_id, embedder, lambda message: console.print(message, markup=False))
+    summary = run_worker(coordinator, config, worker_id, embedder, lambda message: console.print(message, markup=False),
+                         wait_for_leases=wait_for_leases)
     console.print(f"Completed {summary['completed']} chunk(s) in {summary['elapsed_seconds']:.2f}s "
                   f"({summary['chunks_per_second']:.3f} chunks/s); {summary['failed_attempts']} failed attempt(s); "
                   f"{summary['discarded']} discarded result(s).")
@@ -90,22 +96,44 @@ def search(ctx: typer.Context, query: str,
                           markup=False, soft_wrap=True)
 
 
-@app.command()
-def status(ctx: typer.Context):
-    """Show persisted counts, workers, and errors (a single snapshot)."""
-    snapshot = LocalCoordinator(Storage(ctx.obj)).status()
-    console.print(f"Recordings: {snapshot['recordings']} | Retries: {snapshot['retries']} | "
-                  f"Completed chunk time: {snapshot['chunk_seconds']:.2f}s")
-    console.print(" | ".join(f"{state}: {count}" for state, count in snapshot["counts"].items()))
-    table = Table("Worker", "Last seen (UTC)", "Leased chunk", "Lease expires (UTC)")
+def status_view(snapshot: dict) -> Group:
+    """Render a read-only DB snapshot; lease expiry is not proof of process death."""
+    heading = Text(f"Recordings: {snapshot['recordings']} | Retries: {snapshot['retries']} | "
+                   f"Completed chunk time: {snapshot['chunk_seconds']:.2f}s")
+    counts = Text(" | ".join(f"{state}: {count}" for state, count in snapshot["counts"].items()))
+    table = Table("Worker", "Last seen (UTC)", "Assignment", "Leased chunk", "Lease expires (UTC)", "Completed")
     for row in snapshot["workers"]:
         last_seen = datetime.fromtimestamp(row["last_seen"], timezone.utc).isoformat(timespec="seconds")
         expiration = (datetime.fromtimestamp(row["lease_expiration"], timezone.utc).isoformat(timespec="seconds")
                       if row["lease_expiration"] is not None else "—")
-        table.add_row(row["id"], last_seen, row["active_job"] or "—", expiration)
-    console.print(table)
-    for row in snapshot["errors"]:
-        console.print(f"{row['id']} ({row['state']}): {row['last_error']}", markup=False)
+        assignment = ("expired lease" if row["lease_expiration"] <= snapshot["sampled_at"] else "leased") if row["active_job"] else "no lease"
+        table.add_row(Text(row["id"]), last_seen, assignment, row["active_job"] or "—", expiration,
+                      str(row["completed"]))
+    recordings = Table("Recording", "ID", "Completed / total", "Failed")
+    for row in snapshot["recording_progress"]:
+        recordings.add_row(Text(row["original_name"]), row["id"], f"{row['completed']} / {row['total']}", str(row["failed"]))
+    errors = [Text(f"{row['id']} ({row['state']}): {row['last_error']}") for row in snapshot["errors"]]
+    return Group(heading, counts, recordings, table, *errors)
+
+
+@app.command()
+def status(ctx: typer.Context,
+           watch: Annotated[bool, typer.Option(help="Refresh until Ctrl-C; does not change queue state.")] = False,
+           interval: Annotated[float, typer.Option(min=0.05, help="Seconds between live snapshots.")] = 1.0):
+    """Show recording progress, leases, worker activity, retries, and errors."""
+    if not math.isfinite(interval):
+        raise ValueError("Status interval must be finite.")
+    coordinator = LocalCoordinator(Storage(ctx.obj))
+    if not watch:
+        console.print(status_view(coordinator.status()))
+        return
+    try:
+        with Live(status_view(coordinator.status()), console=console, auto_refresh=False) as live:
+            while True:
+                time.sleep(interval)
+                live.update(status_view(coordinator.status()), refresh=True)
+    except KeyboardInterrupt:
+        pass
 
 
 def main():

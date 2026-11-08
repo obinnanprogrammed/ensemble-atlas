@@ -121,9 +121,15 @@ class LocalCoordinator:
             counts = dict.fromkeys(("pending", "leased", "completed", "failed"), 0)
             counts.update({row[0]: row[1] for row in db.execute("SELECT state, COUNT(*) FROM jobs GROUP BY state")})
             workers = [dict(row) for row in db.execute("""SELECT w.id, w.last_seen, j.id AS active_job,
-                       j.lease_expiration FROM workers w LEFT JOIN jobs j
+                       j.lease_expiration,
+                       (SELECT COUNT(*) FROM jobs c WHERE c.worker_id=w.id AND c.state='completed') AS completed
+                       FROM workers w LEFT JOIN jobs j
                        ON j.worker_id=w.id AND j.state='leased' ORDER BY w.id""")]
-            return {"counts": counts, "recordings": db.execute("SELECT COUNT(*) FROM recordings").fetchone()[0],
+            progress = [dict(row) for row in db.execute("""SELECT r.id, r.original_name, COUNT(j.id) AS total,
+                        SUM(j.state='completed') AS completed, SUM(j.state='failed') AS failed
+                        FROM recordings r JOIN jobs j ON j.recording_id=r.id GROUP BY r.id ORDER BY r.id""")]
+            return {"sampled_at": self.clock(), "recording_progress": progress,
+                    "counts": counts, "recordings": db.execute("SELECT COUNT(*) FROM recordings").fetchone()[0],
                     "workers": workers,
                     "retries": db.execute("SELECT COALESCE(SUM(MAX(attempt_count-1, 0)), 0) FROM jobs").fetchone()[0],
                     "chunk_seconds": db.execute("SELECT COALESCE(SUM(elapsed_seconds), 0) FROM jobs WHERE state='completed'").fetchone()[0],
