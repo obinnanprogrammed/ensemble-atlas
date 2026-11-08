@@ -8,7 +8,7 @@ EnsembleAtlas is a solo, 24-hour TAMU Datathon 2026 project. The initial impleme
 
 **Milestones 1–4 are implemented:** the local Python CLI ingests recordings, indexes their timestamped windows with independent CPU CLAP workers, persists embeddings, and searches them with text or an audio example. The durable SQLite queue supports atomic claims, attempt tokens, lease renewal, bounded retries, and recovery across worker/process restarts. `atlas ingest`, `atlas worker`, `atlas search TEXT`, `atlas search --audio PATH`, and `atlas status` (snapshot or live) are available.
 
-The systems demo runs one- and two-worker comparisons and terminates a claimed worker to demonstrate reassignment and complete indexing. Playback and the later service/UI extensions remain future work. The remaining sections describe the development contract; only functionality identified above is delivered.
+The systems demo runs one- and two-worker comparisons and terminates a claimed worker to demonstrate reassignment and complete indexing. An interactive terminal search form is available with `atlas tui`. Playback and the later web/service extensions remain future work. The remaining sections describe the development contract; only functionality identified above is delivered.
 
 ## Setup and first search
 
@@ -108,6 +108,18 @@ atlas search --audio example.wav --top-k 5 --windows-per-recording 3
 ```
 
 Supply exactly one of positional text or `--audio PATH`. Query clips must be nonempty, decodable, finite audio no longer than 10 seconds; longer clips are rejected with an instruction to trim them. Stereo clips are converted to mono, resampled to 48 kHz, and zero-padded to 10 seconds using the same preprocessing as indexed windows. The audio projection uses the same pinned CLAP checkpoint and normalized shared embedding space. Queries are read directly and are not copied into managed storage or enqueued. Audio search loads its own CPU model, just like text search, and works with existing indexes without re-ingestion. Format support follows the ingestion decoder described above.
+
+## Interactive terminal search
+
+Run `atlas tui` (or `atlas --data-dir /absolute/path/data tui`) in an interactive terminal. It uses Python's built-in curses on the tested Linux environment; no additional packages are required. Ingestion, workers, status, and direct searches remain available through the existing CLI.
+
+Use Tab/Shift-Tab to move between mode, query, recording count, and windows per recording. Select Text or Audio with Left/Right or Space in the mode field. Type a natural language query or an audio file path (without shell quotes), and enter any positive whole number for the result count, such as 3 or 5. Press Enter to search. Audio paths accept `~`; the existing ten-second query limit and decoder rules apply. Switching modes clears the query field.
+
+Each submission runs `atlas search --json` in a child process using the same Python interpreter and data directory. The form remains responsive during model loading and inference. Accented recording cards group each name, ID, managed path, cosine score, and matching timestamps. Up/Down moves the viewport by one recording; Page Up/Page Down moves by the visible card count. Cards stay together, with the selected recording at the top. When a single recording exceeds the available height, F3/F4 switches between its detail pages. Resizing reflows the cards; a terminal of at least 48 columns and 20 rows is required for the form. Colors fall back to monochrome when unavailable.
+
+Use Backspace to edit and Ctrl-U to clear a field. Esc cancels an active search; Esc when idle or Ctrl-C quits. Exiting also terminates and reaps the active search process. Each search loads its own model, so the same memory guidance as direct CLI search applies. This form accepts a typed audio path; a file browser and playback are not implemented.
+
+For structured CLI output, `atlas search "a dog barking" --json` (also supported with `--audio`) returns a JSON array of recording objects with `recording_id`, `original_name`, `audio_path`, `score`, and `matches`. Each match contains `chunk_id`, `start`, `end`, and `score`; an empty index returns `[]`. Normal CLI output is unchanged when `--json` is omitted. Search failures retain the existing nonzero exit status and human-readable errors; model diagnostics are written separately to stderr.
 
 ## Systems demo and worker comparison
 

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import math
+import json
 import sqlite3
 import time
 from typing import Annotated
@@ -79,14 +80,21 @@ def timestamp(seconds: float) -> str:
 def search(ctx: typer.Context, query: Annotated[str | None, typer.Argument()] = None,
            audio: Annotated[Path | None, typer.Option(help="Query clip of at most 10 seconds; shorter clips are zero-padded.")] = None,
            top_k: Annotated[int, typer.Option(min=1, help="Number of recordings to return.")] = 5,
-           windows_per_recording: Annotated[int, typer.Option(min=1, help="Best windows to show per recording.")] = 3):
+           windows_per_recording: Annotated[int, typer.Option(min=1, help="Best windows to show per recording.")] = 3,
+           json_output: Annotated[bool, typer.Option("--json", help="Emit structured recording results as JSON.")] = False):
     """Rank recordings by their best window and show matching timestamps."""
     validate_query(query, audio)
     storage = Storage(ctx.obj)
     if not storage.completed():
+        if json_output:
+            print(json.dumps([]))
+            return
         console.print("No completed embeddings. Run atlas ingest and atlas worker first.")
         return
     hits = search_index(storage, ClapEmbedder(ctx.obj), query, top_k, windows_per_recording, audio=audio)
+    if json_output:
+        print(json.dumps(hits))
+        return
     console.print("Recordings ranked by best window. Cosine similarity is a ranking score.")
     for index, hit in enumerate(hits, 1):
         console.print(f"{index}. {hit['original_name']} [{hit['recording_id']}]\n"
@@ -95,6 +103,13 @@ def search(ctx: typer.Context, query: Annotated[str | None, typer.Argument()] = 
         for match in hit["matches"]:
             console.print(f"   {timestamp(match['start'])} – {timestamp(match['end'])} | cosine {match['score']:.4f}",
                           markup=False, soft_wrap=True)
+
+
+@app.command()
+def tui(ctx: typer.Context):
+    """Open the interactive terminal search form (text or audio path)."""
+    from .tui import run
+    run(ctx.obj.data_dir)
 
 
 def status_view(snapshot: dict) -> Group:
