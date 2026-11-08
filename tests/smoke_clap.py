@@ -53,16 +53,21 @@ def main():
         reopened = Storage(local_config)
         hits = search(reopened, embedder, args.query, top_k=10)
         distractors = search(reopened, embedder, args.distractor, top_k=10)
+        audio_hits = search(reopened, embedder, audio=args.fixture, top_k=10)
         assert summary["completed"] == ingested["chunks"], summary
         assert len(hits) == 1, hits
         matches = hits[0]["matches"]
         assert matches[0]["end"] > 10 and matches[0]["start"] >= 5, hits
         assert hits[0]["score"] > distractors[0]["score"], (hits, distractors)
         assert hits[0]["score"] > next(match["score"] for match in matches if match["start"] == 0), hits
+        audio_matches = audio_hits[0]["matches"]
+        assert audio_matches[0]["end"] > 10 and audio_matches[0]["start"] >= 5, audio_hits
+        assert audio_hits[0]["score"] > next(match["score"] for match in audio_matches if match["start"] == 0), audio_hits
         print(json.dumps({"model_load_seconds": model_seconds, "worker": summary,
                           "query": args.query, "distractor": args.distractor,
                           "recording_score": hits[0]["score"], "matches": matches,
-                          "distractor_best_score": distractors[0]["score"]}, indent=2))
+                          "distractor_best_score": distractors[0]["score"],
+                          "audio_query_matches": audio_matches}, indent=2))
         print("PASS: real projected embeddings, persistence, and timestamp retrieval.")
         print("Inspect the fixture and results manually to assess semantic relevance.")
 

@@ -1,16 +1,34 @@
 import heapq
+from pathlib import Path
 
 import numpy as np
 
 from .embeddings import Embedder, normalize
+from .audio import inspect_audio, read_window
+from .config import WINDOW_SECONDS
 from .storage import Storage
 
 
-def search(storage: Storage, embedder: Embedder, query: str, top_k: int = 5,
-           windows_per_recording: int = 3) -> list[dict]:
+def validate_query(query: str | None, audio: Path | None) -> float | None:
+    """Validate exactly one query source; return the audio duration if supplied."""
+    if (query is None) == (audio is None):
+        raise ValueError("Supply exactly one of search text or --audio PATH.")
+    if audio is None:
+        if not query.strip():
+            raise ValueError("Search text cannot be blank.")
+        return None
+    if not audio.is_file():
+        raise ValueError(f"Query audio does not exist or is not a file: {audio}")
+    frames, rate = inspect_audio(audio)
+    if frames > WINDOW_SECONDS * rate:
+        raise ValueError(f"Query audio must be no longer than {WINDOW_SECONDS} seconds. Trim the clip and retry.")
+    return frames / rate
+
+
+def search(storage: Storage, embedder: Embedder, query: str | None = None, top_k: int = 5,
+           windows_per_recording: int = 3, *, audio: Path | None = None) -> list[dict]:
     """Rank recordings by their best completed window, with ranked timestamps."""
-    if not query.strip():
-        raise ValueError("Search text cannot be blank.")
+    duration = validate_query(query, audio)
     if top_k < 1:
         raise ValueError("top-k must be at least one.")
     if windows_per_recording < 1:
@@ -21,7 +39,8 @@ def search(storage: Storage, embedder: Embedder, query: str, top_k: int = 5,
     for row in rows:
         if any(row[key] != value for key, value in storage.config.contract.items()):
             raise ValueError("Index contains incompatible model/revision or preprocessing metadata.")
-    query_vector = normalize(embedder.text(query), storage.config.dimension)
+    query_vector = normalize(embedder.audio(read_window(str(audio), 0, duration))
+                             if audio is not None else embedder.text(query), storage.config.dimension)
     recordings = {}
     for row in rows:
         try:

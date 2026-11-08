@@ -57,6 +57,50 @@ class AudioTestCase(unittest.TestCase):
 
 
 class VerticalSliceTests(AudioTestCase):
+    def test_audio_query_uses_shared_preprocessing_and_persisted_ranking(self):
+        self.coordinator.ingest(self.audio_file())
+        run_worker(self.coordinator, self.config, "one", FakeEmbedder(), lambda _: None)
+        query = self.root / "example.wav"
+        sf.write(query, np.full((22050, 2), [0.2, 0.6]), 22050, subtype="FLOAT")
+        class AudioOnly(FakeEmbedder):
+            def text(self, query):
+                raise AssertionError("Audio query must not embed text")
+            def audio(inner, samples):
+                self.assertEqual(samples.shape, (480000,))
+                self.assertAlmostEqual(float(samples[100:47000].mean()), 0.4, places=4)
+                self.assertTrue(np.all(samples[48000:] == 0))
+                return [0, 2, 0]  # Search normalizes query projections.
+        hits = search(Storage(self.config), AudioOnly(), audio=query, top_k=1, windows_per_recording=2)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["score"], 1)
+        self.assertEqual({match["start"] for match in hits[0]["matches"]}, {5, 10})
+        self.assertEqual(self.coordinator.status()["recordings"], 1)
+
+    def test_audio_query_validation_before_model_or_empty_index(self):
+        valid = self.audio_file(duration=10)
+        self.assertEqual(search(self.storage, FakeEmbedder(), audio=valid), [])
+        invalid = self.root / "invalid.wav"
+        invalid.write_bytes(b"not audio")
+        empty = self.root / "empty.wav"
+        sf.write(empty, [], 16000)
+        nonfinite = self.root / "nonfinite.wav"
+        sf.write(nonfinite, [np.nan], 16000, subtype="FLOAT")
+        long = self.root / "long.wav"
+        sf.write(long, np.zeros(160001), 16000)
+        for path in (invalid, empty, nonfinite, long, self.root / "missing.wav", self.root):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                search(self.storage, FakeEmbedder(), audio=path)
+        for kwargs in ({}, {"query": "tone", "audio": valid}):
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                search(self.storage, FakeEmbedder(), **kwargs)
+        runner = CliRunner()
+        with patch("ensemble_atlas.cli.ClapEmbedder", side_effect=AssertionError("unexpected model load")):
+            for args in ([], ["tone", "--audio", str(valid)], ["--audio", str(long)]):
+                result = runner.invoke(app, ["--data-dir", str(self.root / "cli-empty"), "search", *args])
+                self.assertIsInstance(result.exception, ValueError)
+            result = runner.invoke(app, ["--data-dir", str(self.root / "cli-empty"), "search", "--audio", str(valid)])
+            self.assertEqual(result.exit_code, 0, result.output)
+
     def test_ingest_worker_search_survives_new_instances_and_missing_source(self):
         source = self.audio_file()
         result = self.coordinator.ingest(source)
@@ -161,6 +205,12 @@ class VerticalSliceTests(AudioTestCase):
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("00:00:05.000", result.output)
             self.assertNotIn("00:00:10.000", result.output)
+            query_clip = self.root / "query.wav"
+            sf.write(query_clip, np.full(16000, 0.2), 16000)
+            result = runner.invoke(app, [*arguments, "search", "--audio", str(query_clip), "--top-k", "1"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("cosine 1.0000", result.output)
+            self.assertIn("00:00:05.000", result.output)
         result = runner.invoke(app, [*arguments, "search", "tone", "--top-k", "0"])
         self.assertEqual(result.exit_code, 2)
         result = runner.invoke(app, [*arguments, "search", "tone", "--windows-per-recording", "0"])

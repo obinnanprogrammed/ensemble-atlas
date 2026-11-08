@@ -6,9 +6,9 @@ EnsembleAtlas is a solo, 24-hour TAMU Datathon 2026 project. The initial impleme
 
 ## Project status
 
-**Milestones 1–3 are implemented:** the local Python CLI ingests recordings, indexes their timestamped windows with independent CPU CLAP workers, persists embeddings, and searches them with text. The durable SQLite queue supports atomic claims, attempt tokens, lease renewal, bounded retries, and recovery across worker/process restarts. `atlas ingest`, `atlas worker`, `atlas search TEXT`, and `atlas status` (snapshot or live) are available.
+**Milestones 1–4 are implemented:** the local Python CLI ingests recordings, indexes their timestamped windows with independent CPU CLAP workers, persists embeddings, and searches them with text or an audio example. The durable SQLite queue supports atomic claims, attempt tokens, lease renewal, bounded retries, and recovery across worker/process restarts. `atlas ingest`, `atlas worker`, `atlas search TEXT`, `atlas search --audio PATH`, and `atlas status` (snapshot or live) are available.
 
-The systems demo runs one- and two-worker comparisons and terminates a claimed worker to demonstrate reassignment and complete indexing. Audio-example queries, playback, and the later service/UI extensions remain future work. The remaining sections describe the development contract; only functionality identified above is delivered.
+The systems demo runs one- and two-worker comparisons and terminates a claimed worker to demonstrate reassignment and complete indexing. Playback and the later service/UI extensions remain future work. The remaining sections describe the development contract; only functionality identified above is delivered.
 
 ## Setup and first search
 
@@ -44,7 +44,7 @@ Workers load one CPU model each, drain currently available jobs, and by default 
 
 Queue writes use SQLite WAL, `BEGIN IMMEDIATE`, foreign keys, a ten-second busy timeout, and explicit `synchronous=FULL`. Embedding writes flush the file and directory before publishing the database reference; first-created artifact directories are also synced in their parent. Completion checks assignment authority again after the file write. Accepted-attempt retries acknowledge the original result without rewriting it. A crash or a losing completion can leave an unreferenced artifact on disk; automatic artifact cleanup is not implemented. These guarantees assume a local filesystem that honors SQLite locking, atomic rename, and fsync.
 
-Text search loads its own model, so run it after the indexing worker exits on a memory-constrained laptop. Search groups completed windows by recording ID and ranks each recording by its highest window cosine score. `--top-k` counts recordings (default five), and `--windows-per-recording` controls how many best-scoring timestamps appear beneath each recording (default three). Each recording appears once with its name, full ID, managed path, and best score; its windows show actual unpadded start/end timestamps and individual cosine scores, ordered best first. Overlapping windows remain separate within their recording. There is no minimum similarity threshold, so the displayed windows are the best available candidates rather than guaranteed semantic matches. Embeddings are exact-search ranked with NumPy; scores are not confidence percentages. This presentation change works with existing indexes and requires no re-ingestion or re-embedding. Audio-example search (`--audio`) is not yet implemented.
+Each text or audio search loads its own model, so run it after the indexing worker exits on a memory-constrained laptop. Search groups completed windows by recording ID and ranks each recording by its highest window cosine score. `--top-k` counts recordings (default five), and `--windows-per-recording` controls how many best-scoring timestamps appear beneath each recording (default three). Each recording appears once with its name, full ID, managed path, and best score; its windows show actual unpadded start/end timestamps and individual cosine scores, ordered best first. Overlapping windows remain separate within their recording. There is no minimum similarity threshold, so the displayed windows are the best available candidates rather than guaranteed semantic matches. Embeddings are exact-search ranked with NumPy; scores are not confidence percentages. This presentation change works with existing indexes and requires no re-ingestion or re-embedding. Audio-example search uses the same ranking and output (`--audio`; see below).
 
 ## Running validation
 
@@ -54,7 +54,7 @@ python -m unittest discover -s tests -v
 python -m pip check
 ```
 
-The lightweight tests use fake embeddings and generated audio. They cover the CLI flow, recording grouping and ranking by maximum window score, per-recording window limits, tail/padding/resampling policy, validation errors, persistent search results, incompatible metadata, atomic cross-process claims, process termination and reassignment, stale and concurrent duplicate completions, heartbeat renewal during inference and renewal failure, retry limits across restarts, invalid timings, artifact-write failure, lease expiration during artifact writes, database rollback during completion, and process termination after artifact rename before database acceptance. Systems tests also run two independent worker processes, terminate one after a claim, verify the survivor completes the entire index, check late and duplicate completions, refresh live status across a completion, and exercise a heartbeat racing with successful completion. They do not download CLAP.
+The lightweight tests use fake embeddings and generated audio. They cover the CLI flow, recording grouping and ranking by maximum window score, per-recording window limits, tail/padding/resampling policy, validation errors, persistent search results, incompatible metadata, audio-example retrieval and shared preprocessing, exclusive query inputs, invalid/overlong query clips, atomic cross-process claims, process termination and reassignment, stale and concurrent duplicate completions, heartbeat renewal during inference and renewal failure, retry limits across restarts, invalid timings, artifact-write failure, lease expiration during artifact writes, database rollback during completion, and process termination after artifact rename before database acceptance. Systems tests also run two independent worker processes, terminate one after a claim, verify the survivor completes the entire index, check late and duplicate completions, refresh live status across a completion, and exercise a heartbeat racing with successful completion. They do not download CLAP.
 
 Run the separate real-model smoke test with an identifiable clip no longer than ten seconds:
 
@@ -63,9 +63,11 @@ python tests/smoke_clap.py --fixture /path/to/short-dog-bark.wav \
     --query "a dog barking" --distractor "a person playing a violin"
 ```
 
-This caches the real checkpoint under `data/models` and uses a temporary index. It places the event after ten seconds of silence, indexes all windows, reopens the database, and checks that the matching query retrieves the event over silence and an unrelated query. After the checkpoint is cached, `HF_HUB_OFFLINE=1` runs it without network access. Listen to the fixture and inspect its timestamps for a manual semantic relevance check; passing a vector-shape check alone is insufficient.
+This caches the real checkpoint under `data/models` and uses a temporary index. It places the event after ten seconds of silence, indexes all windows, reopens the database, and checks that the matching query retrieves the event over silence and an unrelated query. It also embeds the fixture as an audio query and checks that event timestamps outrank silence. After the checkpoint is cached, `HF_HUB_OFFLINE=1` runs it without network access. Listen to the fixture and inspect its timestamps for a manual semantic relevance check; passing a vector-shape check alone is insufficient.
 
 Development smoke result: [ESC-50's `1-100032-A-0.wav`](https://github.com/karolpiczak/ESC-50/blob/master/audio/1-100032-A-0.wav), a five-second dog-bark fixture, was downloaded outside the repository. See the dataset's [attribution and license](https://github.com/karolpiczak/ESC-50#license). With ten seconds of silence prepended, “a dog barking” retrieved 5–15s (0.5280) and 10–15s (0.4776), ahead of silence at 0–10s (0.2523); the violin query's best score was 0.2210. One worker indexed three chunks in 1.75s (1.716 chunks/s), excluding the 22.44s cached model load and ingestion. This is one small fixture on the development machine; see the separate systems comparison below.
+
+Milestone 4 smoke check (2026-11-07): using the cached real checkpoint, a generated two-second 440 Hz tone queried a recording containing ten seconds of silence followed by that tone. Audio search ranked 10–12s (1.0000) and 5–12s (0.9799) above silence at 0–10s (0.3142). The extended smoke script also passed its text-query checks. This checks audio-example timestamp retrieval on a synthetic fixture; it does not establish relevance on natural recordings.
 
 ## Scope and decisions
 
@@ -83,7 +85,7 @@ Multiple workers on one machine are a local demonstration of a distributed-style
 
 ## Intended user workflow
 
-The currently implemented text-search workflow is:
+The currently implemented search workflow is:
 
 ```bash
 # Ingest a recording and enqueue its windows.
@@ -99,7 +101,13 @@ atlas status
 atlas search "brass playing a slow melody" --top-k 5
 ```
 
-The planned audio-example interface is `atlas search --audio example.wav --top-k 5`.
+Search with an audio example instead of text:
+
+```bash
+atlas search --audio example.wav --top-k 5 --windows-per-recording 3
+```
+
+Supply exactly one of positional text or `--audio PATH`. Query clips must be nonempty, decodable, finite audio no longer than 10 seconds; longer clips are rejected with an instruction to trim them. Stereo clips are converted to mono, resampled to 48 kHz, and zero-padded to 10 seconds using the same preprocessing as indexed windows. The audio projection uses the same pinned CLAP checkpoint and normalized shared embedding space. Queries are read directly and are not copied into managed storage or enqueued. Audio search loads its own CPU model, just like text search, and works with existing indexes without re-ingestion. Format support follows the ingestion decoder described above.
 
 ## Systems demo and worker comparison
 
@@ -247,14 +255,14 @@ Use schema constraints for unique chunk results and valid relationships. Store s
 
 Load CLAP once per worker, not once per chunk. Start with CPU inference unless a usable accelerator is confirmed. Two processes duplicate model memory and can oversubscribe CPU threads; measure memory, chunk latency, and throughput before increasing concurrency. On a single GPU, start with one inference worker and consider batching before additional model processes.
 
-Keep chunk claims bounded: initially one active chunk per worker. A long recording should not cause all decoded windows to remain in memory. Text search may initially load a separate model process; document its memory cost and avoid running it concurrently with indexing if the laptop cannot sustain both.
+Keep chunk claims bounded: initially one active chunk per worker. A long recording should not cause all decoded windows to remain in memory. Text and audio search load a separate model process; document its memory cost and avoid running it concurrently with indexing if the laptop cannot sustain both.
 
 ## Implementation milestones
 
 1. **Vertical slice — implemented:** ingest one recording, process with one worker, persist embeddings, and return text-search timestamps.
 2. **Durable queue — implemented:** atomic claims, lease tokens, heartbeats, retries, and restart-safe state.
 3. **Systems demo — implemented:** two workers, live CLI status, worker termination, reassignment, complete indexing, and measured one/two-worker comparisons.
-4. **Audio queries:** embed a query clip and retrieve matching recording segments.
+4. **Audio queries — implemented:** embed a query clip and retrieve matching recording segments.
 5. **Polish:** useful errors, setup instructions, reproducible commands, and measured resource usage.
 
 The first milestone must work before adding more infrastructure.

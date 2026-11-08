@@ -15,6 +15,7 @@ from .config import Config
 from .coordinator import LocalCoordinator
 from .embeddings import ClapEmbedder
 from .search import search as search_index
+from .search import validate_query
 from .storage import Storage
 from .worker import run_worker
 
@@ -75,17 +76,17 @@ def timestamp(seconds: float) -> str:
 
 
 @app.command()
-def search(ctx: typer.Context, query: str,
+def search(ctx: typer.Context, query: Annotated[str | None, typer.Argument()] = None,
+           audio: Annotated[Path | None, typer.Option(help="Query clip of at most 10 seconds; shorter clips are zero-padded.")] = None,
            top_k: Annotated[int, typer.Option(min=1, help="Number of recordings to return.")] = 5,
            windows_per_recording: Annotated[int, typer.Option(min=1, help="Best windows to show per recording.")] = 3):
     """Rank recordings by their best window and show matching timestamps."""
-    if not query.strip():
-        raise ValueError("Search text cannot be blank.")
+    validate_query(query, audio)
     storage = Storage(ctx.obj)
     if not storage.completed():
         console.print("No completed embeddings. Run atlas ingest and atlas worker first.")
         return
-    hits = search_index(storage, ClapEmbedder(ctx.obj), query, top_k, windows_per_recording)
+    hits = search_index(storage, ClapEmbedder(ctx.obj), query, top_k, windows_per_recording, audio=audio)
     console.print("Recordings ranked by best window. Cosine similarity is a ranking score.")
     for index, hit in enumerate(hits, 1):
         console.print(f"{index}. {hit['original_name']} [{hit['recording_id']}]\n"
